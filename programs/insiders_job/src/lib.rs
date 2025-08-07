@@ -1,17 +1,40 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::Mint;
+use anchor_spl::{associated_token::AssociatedToken, token::{Mint, Token, TokenAccount}};
 
 declare_id!("BHjZkKNQkAZX1t2zSXBLQaoSKN5U1zkthh9x2zq4odr2");
 
 #[program]
 pub mod insiders_job {
     use super::*;
-
+    #[error_code]
+    pub enum MarketErrorCode {
+        #[msg("Unauthorized")]
+        Unauthorized,
+        #[msg("Config not initialized")]
+        ConfigNotInitialized,
+        #[msg("Market end time must be after start time")]
+        InvalidTimeRange,
+        #[msg("Market has already ended")]
+        MarketEnded,
+        #[msg("Market has not started yet")]
+        MarketNotStarted,
+        #[msg("Market is already resolved")]
+        AlreadyResolved,
+        #[msg("Only admin can resolve market")]
+        UnauthorizedResolution,
+        #[msg("Stake amount below minimum")]
+        StakeTooLow,
+        #[msg("Fee too high")]
+        FeeTooHigh,
+        #[msg("Calculation overflow")]
+        CalculationOverflow,
+    }
+    
     /// ADMIN: INITIALIZE/UPDATE CONFIG:
-
+    
     const MAX_FEE_RATE_BPS: u64 = 1000; // 10%
     const MIN_STAKE_LAMPORTS: u64 = 40_000_000; // 0.04 sol
-
+    
     pub fn initialize_config(
         ctx: Context<InitializeConfig>,
         fee_rate: u64,
@@ -67,7 +90,6 @@ pub mod insiders_job {
         
         Ok(())
     }
-    
 
     #[derive(Accounts)]
     pub struct UpdateConfig<'info> {
@@ -91,35 +113,49 @@ pub mod insiders_job {
         pub initialized: bool,
     }
 
+    /// ADMIN: INITIALIZE MARKET 
     pub fn initialize_market(
         ctx: Context<InitializeMarket>,
         token_address: Pubkey,
         market_mint: Pubkey,
-        start_ts: i64,
-        end_ts: i64,
+        duration_seconds: i64,
     ) -> Result<()> {
         let market = &mut ctx.accounts.market;
         let config = &ctx.accounts.config;
-
-        market.init(
-            config.admin,
+        
+        let now = Clock::get()?.unix_timestamp;
+        let start_ts = now;
+        let end_ts = now + duration_seconds;
+        
+        let market_init_args = MarketInitArgs {
+            admin: config.admin,
             token_address,
             market_mint,
             start_ts,
             end_ts,
-            ctx.bumps.market,
-        )?;
+            bump: ctx.bumps.market,
+        };
+
+        market.init(market_init_args)?;
 
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-#[instruction(token_address: Pubkey, market_mint: Pubkey)]
+#[instruction(token_address: Pubkey)]
 pub struct InitializeMarket<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
-
+    
+    #[account(
+        init,
+        payer = admin,
+        mint::decimals = 0,
+        mint::authority = market,
+        mint::freeze_authority = market,
+    )]
+    pub market_mint: Account<'info, Mint>, // mint of the 24-hour market window
     #[account(
         seeds = [b"config", ID.as_ref()],
         bump,
@@ -132,7 +168,7 @@ pub struct InitializeMarket<'info> {
         init,
         payer = admin,
         space = 8 + Market::INIT_SPACE,
-        seeds = [b"market", market_mint.as_ref()], 
+        seeds = [b"market", market_mint.key().as_ref()], // TODO: is it the right seed?
         bump,
     )]
     pub market: Account<'info, Market>,
@@ -141,12 +177,7 @@ pub struct InitializeMarket<'info> {
         constraint = token_mint.key() == token_address
     )]
     pub token_mint: Account<'info, Mint>,
-
-    #[account(
-        constraint = round_mint.key() == market_mint
-    )]
-    pub round_mint: Account<'info, Mint>, // mint of the 24-hour market window
-
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
@@ -159,58 +190,114 @@ pub struct Market {
     pub market_mint: Pubkey,
     pub start_ts: i64,
     pub end_ts: i64,
-    pub total_stake: u64,
+    pub sol_reserve: u64,
     pub total_score: Option<u64>,
     pub final_mcap: Option<u64>,
     pub resolved: bool,
     pub bump: u8,
 }
 
+pub struct MarketInitArgs {
+    pub admin: Pubkey,
+    pub token_address: Pubkey,
+    pub market_mint: Pubkey,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub bump: u8,
+}
+
 impl Market {
     pub fn init(
         &mut self,
-        admin: Pubkey,
-        token_address: Pubkey,
-        market_mint: Pubkey,
-        start_ts: i64,
-        end_ts: i64,
-        bump: u8,
+        args: MarketInitArgs,
     ) -> Result<()> {
-        require!(end_ts > start_ts, MarketErrorCode::InvalidTimeRange);
+        require!(args.end_ts > args.start_ts, MarketErrorCode::InvalidTimeRange);
 
-        self.admin = admin;
-        self.token_address = token_address;
-        self.market_mint = market_mint;
-        self.start_ts = start_ts;
-        self.end_ts = end_ts;
-        self.total_stake = 0;
+        self.admin = args.admin;
+        self.token_address = args.token_address;
+        self.market_mint = args.market_mint;
+        self.start_ts = args.start_ts;
+        self.end_ts = args.end_ts;
+        self.bump = args.bump;
+        self.sol_reserve = 0;
         self.total_score = None;
         self.final_mcap = None;
         self.resolved = false;
-        self.bump = bump;
 
         Ok(())
     }
 }
 
-#[error_code]
-pub enum MarketErrorCode {
-    #[msg("Unauthorized")]
-    Unauthorized,
-    #[msg("Config not initializd")]
-    ConfigNotInitialized,
-    #[msg("Market end time must be after start time")]
-    InvalidTimeRange,
-    #[msg("Market has already ended")]
-    MarketEnded,
-    #[msg("Market has not started yet")]
-    MarketNotStarted,
-    #[msg("Market is already resolved")]
-    AlreadyResolved,
-    #[msg("Only admin can resolve market")]
-    UnauthorizedResolution,
-    #[msg("Stake amount below minimum")]
-    StakeTooLow,
-    #[msg("Fee too high")]
-    FeeTooHigh,
+pub fn place_prediction(
+    ctx: Context<PlacePredictionCtx>,
+    guessed_mcap: u64,
+    stake: u64,
+) -> Result<()>{
+    let market = &mut ctx.accounts.market;
+    let config = &ctx.accounts.config;
+    
+    let now = Clock::get()?.unix_timestamp;
+    require!(now >= market.start_ts, MarketErrorCode::MarketNotStarted);
+    require!(now < market.end_ts, MarketErrorCode::MarketEnded);
+    require!(!market.resolved, MarketErrorCode::AlreadyResolved);
+    
+    require!(stake >= config.min_stake, MarketErrorCode::StakeTooLow);
+    
+    // Calculate the score
+    let user_bet = stake.checked_mul(guessed_mcap).ok_or(MarketErrorCode::CalculationOverflow);
+    
+    // Transfering user's SOL to the market reserve
+    let user_address = ctx.accounts.user.to_account_info(); 
+    let market_address = ctx.accounts.market.to_account_info();
+    
+    anchor_lang::system_program::transfer(
+        CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer{
+                from: user_address.clone(),
+                to: market_address.clone(),
+            }
+        ),
+        stake,
+    )?;
+    
+    // market.sol_reserve = market.sol_reserve.checked_add(stake).ok_or(MarketErrorCode::CalculationOverflow)?;
+    
+    
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct PlacePredictionCtx<'info>{
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    #[account(
+        mut,
+        seeds = [b"market", market_mint.key().as_ref()],
+        bump = market.bump,
+        
+    )]
+    pub market: Account<'info, Market>,
+     
+    #[account(
+        seeds = [b"config", ID.as_ref()],
+        bump,
+    )]
+    pub config: Account<'info, Config>,
+    
+    #[account(mut)] 
+    pub market_mint: Account<'info, Mint>,
+    
+    #[account(
+        init_if_needed,
+        payer = user,
+        associated_token::mint = market_mint,
+        associated_token::authority = user,
+    )]
+    pub user_bet_token_account: Account<'info, TokenAccount>,
+    
+    pub token_program: Account<'info, TokenAccount>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
 }

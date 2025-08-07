@@ -51,4 +51,10 @@ describe("insiders_job", () => {
 
   })
 
+  it("Initialize Market" async () => {
+    const tokenAddress = new PublicKey("8Ga7ExC7toM9v1PqCB8jjKRTKqiYqQGLCua2VnXdbonk");
+    const marketMint = Keypair.generate();
+    // const tx = await program.methods.initializeMarket()
+  })
+
 });
