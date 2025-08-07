@@ -7,14 +7,24 @@ declare_id!("BHjZkKNQkAZX1t2zSXBLQaoSKN5U1zkthh9x2zq4odr2");
 pub mod insiders_job {
     use super::*;
 
+    /// ADMIN: INITIALIZE/UPDATE CONFIG:
+
+    const MAX_FEE_RATE_BPS: u64 = 1000; // 10%
+    const MIN_STAKE_LAMPORTS: u64 = 40_000_000; // 0.04 sol
+
     pub fn initialize_config(
-        // TODO: make sure its only callable by admin only
         ctx: Context<InitializeConfig>,
         fee_rate: u64,
         min_stake: u64,
     ) -> Result<()> {
-        let config = &mut ctx.accounts.config;
+        // TODO: add the admin check
+        require!(fee_rate <= MAX_FEE_RATE_BPS, MarketErrorCode::FeeTooHigh);
+        require!(
+            min_stake >= MIN_STAKE_LAMPORTS,
+            MarketErrorCode::StakeTooLow
+        );
 
+        let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.admin.key();
         config.fee_rate = fee_rate;
         config.min_stake = min_stake;
@@ -36,6 +46,40 @@ pub mod insiders_job {
         )]
         pub config: Account<'info, Config>,
         pub system_program: Program<'info, System>,
+    }
+    
+    pub fn update_config(
+        ctx: Context<UpdateConfig>,
+        fee_rate_bps: Option<u64>,
+        min_stake_lamports: Option<u64>,
+    ) -> Result<()>{
+        let config = &mut ctx.accounts.config;
+        
+        if let Some(fee_rate) = fee_rate_bps{
+            require!(fee_rate <= MAX_FEE_RATE_BPS, MarketErrorCode::FeeTooHigh);
+            config.fee_rate = fee_rate;
+        }
+        
+        if let Some(min_stake) = min_stake_lamports{
+            require!(min_stake >= MIN_STAKE_LAMPORTS, MarketErrorCode::StakeTooLow);
+            config.min_stake = min_stake;
+        }
+        
+        Ok(())
+    }
+    
+
+    #[derive(Accounts)]
+    pub struct UpdateConfig<'info> {
+        #[account(mut)]
+        pub admin: Signer<'info>,
+        #[account(
+            mut, 
+            seeds = [b"config", ID.as_ref()],
+            bump, 
+            constraint = config.admin == admin.key() @ MarketErrorCode::Unauthorized,
+        )]
+        pub config: Account<'info, Config>,
     }
 
     #[account]
@@ -79,8 +123,8 @@ pub struct InitializeMarket<'info> {
     #[account(
         seeds = [b"config", ID.as_ref()],
         bump,
-        constraint = config.initialized @ ErrorCode::ConfigNotInitialized,
-        constraint = config.admin == admin.key() @ ErrorCode::Unathorized,
+        constraint = config.initialized @ MarketErrorCode::ConfigNotInitialized,
+        constraint = config.admin == admin.key() @ MarketErrorCode::Unauthorized,
     )]
     pub config: Account<'info, Config>,
 
@@ -132,7 +176,7 @@ impl Market {
         end_ts: i64,
         bump: u8,
     ) -> Result<()> {
-        require!(end_ts > start_ts, ErrorCode::InvalidTimeRange);
+        require!(end_ts > start_ts, MarketErrorCode::InvalidTimeRange);
 
         self.admin = admin;
         self.token_address = token_address;
@@ -150,9 +194,9 @@ impl Market {
 }
 
 #[error_code]
-pub enum ErrorCode {
-    #[msg("Unathorized")]
-    Unathorized,
+pub enum MarketErrorCode {
+    #[msg("Unauthorized")]
+    Unauthorized,
     #[msg("Config not initializd")]
     ConfigNotInitialized,
     #[msg("Market end time must be after start time")]
@@ -167,4 +211,6 @@ pub enum ErrorCode {
     UnauthorizedResolution,
     #[msg("Stake amount below minimum")]
     StakeTooLow,
+    #[msg("Fee too high")]
+    FeeTooHigh,
 }
