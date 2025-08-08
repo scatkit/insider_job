@@ -1,5 +1,6 @@
-use anchor_lang::prelude::*;
-use anchor_spl::{associated_token::AssociatedToken, token::{Mint, Token, TokenAccount}};
+use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
+use anchor_spl::{associated_token::AssociatedToken, token::{Mint, Token, TokenAccount}, token_2022::Token2022};
+ 
 
 declare_id!("BHjZkKNQkAZX1t2zSXBLQaoSKN5U1zkthh9x2zq4odr2");
 
@@ -31,7 +32,7 @@ pub mod insiders_job {
     }
     
     /// ADMIN: INITIALIZE/UPDATE CONFIG:
-    
+
     const MAX_FEE_RATE_BPS: u64 = 1000; // 10%
     const MIN_STAKE_LAMPORTS: u64 = 40_000_000; // 0.04 sol
     
@@ -112,8 +113,6 @@ pub mod insiders_job {
         pub min_stake: u64,
         pub initialized: bool,
     }
-
-    /// ADMIN: INITIALIZE MARKET 
     pub fn initialize_market(
         ctx: Context<InitializeMarket>,
         token_address: Pubkey,
@@ -183,7 +182,6 @@ pub struct InitializeMarket<'info> {
 
 #[account]
 #[derive(InitSpace, Debug)]
-// Data account - holds the state
 pub struct Market {
     pub admin: Pubkey,
     pub token_address: Pubkey,
@@ -228,12 +226,15 @@ impl Market {
     }
 }
 
+/// USER: PLACE PREDICITON
+
 pub fn place_prediction(
     ctx: Context<PlacePredictionCtx>,
     guessed_mcap: u64,
     stake: u64,
 ) -> Result<()>{
     let market = &mut ctx.accounts.market;
+    let user = &mut ctx.accounts.user;
     let config = &ctx.accounts.config;
     
     let now = Clock::get()?.unix_timestamp;
@@ -243,61 +244,106 @@ pub fn place_prediction(
     
     require!(stake >= config.min_stake, MarketErrorCode::StakeTooLow);
     
-    // Calculate the score
-    let user_bet = stake.checked_mul(guessed_mcap).ok_or(MarketErrorCode::CalculationOverflow);
-    
     // Transfering user's SOL to the market reserve
-    let user_address = ctx.accounts.user.to_account_info(); 
-    let market_address = ctx.accounts.market.to_account_info();
-    
-    anchor_lang::system_program::transfer(
-        CpiContext::new(
+    let cpi_context = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
             anchor_lang::system_program::Transfer{
-                from: user_address.clone(),
-                to: market_address.clone(),
-            }
-        ),
-        stake,
-    )?;
+                from: user.to_account_info(),
+                to: market.to_account_info(),
+            },
+        );
+    anchor_lang::system_program::transfer(cpi_context, stake)?;
     
-    // market.sol_reserve = market.sol_reserve.checked_add(stake).ok_or(MarketErrorCode::CalculationOverflow)?;
+    // Update the market state
+    market.sol_reserve = market.sol_reserve.checked_add(stake).ok_or(MarketErrorCode::CalculationOverflow)?;
     
+    let prediction_data = &mut ctx.accounts.prediction_data;
+    prediction_data.market = market.key();
+    prediction_data.prediction_mint = ctx.accounts.prediction_token_mint.key();
+    prediction_data.guessed_mcap = guessed_mcap;
+    prediction_data.stake = stake;
+    prediction_data.timestamp = now;
+    prediction_data.bump = ctx.bumps.prediction_data;
     
+    let market_bump = market.bump;
+    let signer_seeds: &[&[&[u8]]] = &[&[
+        b"market",
+        market.market_mint.as_ref(),
+        &[market_bump],
+    ]];
+    
+    let cpi_accounts =anchor_spl::token::MintTo{
+        mint: ctx.accounts.prediction_token_mint.to_account_info(),
+        to: ctx.accounts.user_bet_token_account.to_account_info(),
+        authority: market.to_account_info(),
+    };
+    let cpi_program = ctx.accounts.token_program.to_account_info();
+    let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+    anchor_spl::token::mint_to(cpi_ctx, 1)?;
+     
     Ok(())
 }
+
 
 #[derive(Accounts)]
 pub struct PlacePredictionCtx<'info>{
     #[account(mut)]
     pub user: Signer<'info>,
     
+    /// CHECK: just used for PDA derivation
+    pub market_mint: AccountInfo<'info>,
+    
     #[account(
         mut,
         seeds = [b"market", market_mint.key().as_ref()],
         bump = market.bump,
-        
     )]
     pub market: Account<'info, Market>,
-     
+    
     #[account(
         seeds = [b"config", ID.as_ref()],
         bump,
     )]
     pub config: Account<'info, Config>,
     
-    #[account(mut)] 
-    pub market_mint: Account<'info, Mint>,
-    
     #[account(
-        init_if_needed,
+        init,
         payer = user,
-        associated_token::mint = market_mint,
+        mint::decimals = 0,
+        mint::authority = market,
+        mint::freeze_authority = market,
+    )]
+    pub prediction_token_mint: Account<'info, Mint>, // pased by the user
+        
+    #[account(
+        init,
+        payer = user,
+        space = 8 + PredictionData::INIT_SPACE,
+        seeds = [b"prediction", prediction_token_mint.key().as_ref()],
+        bump,
+    )]
+    pub prediction_data: Account<'info, PredictionData>,
+    
+    #[account( // why init and not init_if_needed? 
+        init,
+        payer = user,
+        associated_token::mint = prediction_token_mint,
         associated_token::authority = user,
     )]
     pub user_bet_token_account: Account<'info, TokenAccount>,
     
-    pub token_program: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
+    
+    #[account]
+    #[derive(InitSpace, Debug)]
+        pub struct PredictionData {
+            pub market: Pubkey,
+            pub prediction_mint: Pubkey,
+            pub guessed_mcap: u64,
+            pub stake: u64,
+            pub timestamp: i64,
+            pub bump: u8,
+        }
