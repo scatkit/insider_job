@@ -1,5 +1,5 @@
 use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
-use anchor_spl::{associated_token::AssociatedToken, token::{Mint, Token, TokenAccount}, token_2022::Token2022};
+use anchor_spl::{associated_token::AssociatedToken, token::{Mint, SetAuthority, Token, TokenAccount}, token_2022::Token2022};
  
 
 declare_id!("BHjZkKNQkAZX1t2zSXBLQaoSKN5U1zkthh9x2zq4odr2");
@@ -227,7 +227,6 @@ impl Market {
 }
 
 /// USER: PLACE PREDICITON
-
 pub fn place_prediction(
     ctx: Context<PlacePredictionCtx>,
     guessed_mcap: u64,
@@ -271,15 +270,43 @@ pub fn place_prediction(
         market.market_mint.as_ref(),
         &[market_bump],
     ]];
+        
+        let cpi_accounts =anchor_spl::token::MintTo{
+            mint: ctx.accounts.prediction_token_mint.to_account_info(),
+            to: ctx.accounts.user_bet_token_account.to_account_info(),
+            authority: market.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+        anchor_spl::token::mint_to(cpi_ctx, 1)?;
     
-    let cpi_accounts =anchor_spl::token::MintTo{
-        mint: ctx.accounts.prediction_token_mint.to_account_info(),
-        to: ctx.accounts.user_bet_token_account.to_account_info(),
-        authority: market.to_account_info(),
-    };
-    let cpi_program = ctx.accounts.token_program.to_account_info();
-    let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-    anchor_spl::token::mint_to(cpi_ctx, 1)?;
+    // Revoking mint authority
+    anchor_spl::token::set_authority(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority{
+                account_or_mint: ctx.accounts.prediction_token_mint.to_account_info(),
+                current_authority: market.to_account_info(),
+            },
+        signer_seeds,
+    ),
+    anchor_spl::token::spl_token::instruction::AuthorityType::MintTokens,
+    None,
+    )?;
+    
+        // Revoking mint authority
+    anchor_spl::token::set_authority(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority{
+                account_or_mint: ctx.accounts.prediction_token_mint.to_account_info(),
+                current_authority: market.to_account_info(),
+            },
+        signer_seeds,
+    ),
+    anchor_spl::token::spl_token::instruction::AuthorityType::FreezeAccount,
+    None,
+    )?;
      
     Ok(())
 }
@@ -324,7 +351,7 @@ pub struct PlacePredictionCtx<'info>{
     )]
     pub prediction_data: Account<'info, PredictionData>,
     
-    #[account( // why init and not init_if_needed? 
+    #[account(
         init,
         payer = user,
         associated_token::mint = prediction_token_mint,
@@ -339,11 +366,11 @@ pub struct PlacePredictionCtx<'info>{
     
     #[account]
     #[derive(InitSpace, Debug)]
-        pub struct PredictionData {
-            pub market: Pubkey,
-            pub prediction_mint: Pubkey,
-            pub guessed_mcap: u64,
-            pub stake: u64,
-            pub timestamp: i64,
-            pub bump: u8,
-        }
+    pub struct PredictionData {
+        pub market: Pubkey,
+        pub prediction_mint: Pubkey,
+        pub guessed_mcap: u64,
+        pub stake: u64,
+        pub timestamp: i64,
+        pub bump: u8,
+}
