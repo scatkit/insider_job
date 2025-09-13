@@ -1,5 +1,5 @@
-use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
-use anchor_spl::{associated_token::AssociatedToken, token::{Mint, SetAuthority, Token, TokenAccount}, token_2022::Token2022};
+use anchor_lang::{prelude::* };
+use anchor_spl::{associated_token::AssociatedToken, token::{Mint, SetAuthority, Token, TokenAccount}};
  
 
 declare_id!("BHjZkKNQkAZX1t2zSXBLQaoSKN5U1zkthh9x2zq4odr2");
@@ -31,13 +31,12 @@ pub mod insiders_job {
         CalculationOverflow,
     }
     
-    /// ADMIN: INITIALIZE/UPDATE CONFIG:
-
+    /// ADMIN:
     const MAX_FEE_RATE_BPS: u64 = 1000; // 10%
     const MIN_STAKE_LAMPORTS: u64 = 40_000_000; // 0.04 sol
     
     pub fn initialize_config(
-        ctx: Context<InitializeConfig>,
+        ctx: Context<InitializeConfigCtx>,
         fee_rate: u64,
         min_stake: u64,
     ) -> Result<()> {
@@ -58,7 +57,7 @@ pub mod insiders_job {
     }
 
     #[derive(Accounts)]
-    pub struct InitializeConfig<'info> {
+    pub struct InitializeConfigCtx<'info> {
         #[account(mut)]
         admin: Signer<'info>,
         #[account(
@@ -73,7 +72,7 @@ pub mod insiders_job {
     }
     
     pub fn update_config(
-        ctx: Context<UpdateConfig>,
+        ctx: Context<UpdateConigCtx>,
         fee_rate_bps: Option<u64>,
         min_stake_lamports: Option<u64>,
     ) -> Result<()>{
@@ -93,7 +92,7 @@ pub mod insiders_job {
     }
 
     #[derive(Accounts)]
-    pub struct UpdateConfig<'info> {
+    pub struct UpdateConfigCtx<'info> {
         #[account(mut)]
         pub admin: Signer<'info>,
         #[account(
@@ -114,10 +113,10 @@ pub mod insiders_job {
         pub initialized: bool,
     }
     pub fn initialize_market(
-        ctx: Context<InitializeMarket>,
-        token_address: Pubkey,
+        ctx: Context<InitializeMarketCtx>,
+        token_address: Pubkey, // the address of a coin that market is for
         market_mint: Pubkey,
-        duration_seconds: i64,
+        duration_seconds: i64, // e.g 24 hours
     ) -> Result<()> {
         let market = &mut ctx.accounts.market;
         let config = &ctx.accounts.config;
@@ -142,8 +141,7 @@ pub mod insiders_job {
 }
 
 #[derive(Accounts)]
-#[instruction(token_address: Pubkey)]
-pub struct InitializeMarket<'info> {
+pub struct InitializeMarketCtx<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
     
@@ -152,9 +150,10 @@ pub struct InitializeMarket<'info> {
         payer = admin,
         mint::decimals = 0,
         mint::authority = market,
-        mint::freeze_authority = market,
+        mint::freeze_authority = market
     )]
     pub market_mint: Account<'info, Mint>, // mint of the 24-hour market window
+    
     #[account(
         seeds = [b"config", ID.as_ref()],
         bump,
@@ -167,15 +166,11 @@ pub struct InitializeMarket<'info> {
         init,
         payer = admin,
         space = 8 + Market::INIT_SPACE,
-        seeds = [b"market", market_mint.key().as_ref()], // TODO: is it the right seed?
+        seeds = [b"market", market_mint.key().as_ref()],
         bump,
     )]
     pub market: Account<'info, Market>,
 
-    #[account(
-        constraint = token_mint.key() == token_address
-    )]
-    pub token_mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -226,7 +221,8 @@ impl Market {
     }
 }
 
-/// USER: PLACE PREDICITON
+/// USER:
+
 pub fn place_prediction(
     ctx: Context<PlacePredictionCtx>,
     guessed_mcap: u64,
@@ -325,7 +321,7 @@ pub struct PlacePredictionCtx<'info>{
         seeds = [b"market", market_mint.key().as_ref()],
         bump = market.bump,
     )]
-    pub market: Account<'info, Market>,
+    pub market: Account<'info, Market>, // will error out if the account does not exist  
     
     #[account(
         seeds = [b"config", ID.as_ref()],
